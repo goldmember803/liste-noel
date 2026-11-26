@@ -52,7 +52,6 @@ form input[type=text]{border:1px solid var(--line);padding:10px 12px;font-size:1
 <script>
 {
 const API='https://getpantry.cloud/apiv1/pantry/7845d9bd-2a10-451a-84a3-3a85ba252fab/basket/liste';
-const SEED={"items":[{"id":"i1","text":"Parc pour bébé","note":"Conforme aux normes canadiennes, avec son matelas d’origine seulement. Ex. : Graco Pack ’n Play.","done":false},{"id":"i2","text":"Moniteur sans fil","note":"Caméra et écran portatif pour vous. Ex. : Infant Optics ou VTech.","done":false},{"id":"i3","text":"Prise libre et Wi-Fi","note":"Une prise près du parc pour son moniteur Owlet, et le mot de passe Wi-Fi.","done":false},{"id":"i4","text":"Chaise haute","note":"Simple et facile à laver. Ex. : IKEA Antilop, ou un siège d’appoint pour chaise. Peut s’emprunter.","done":false},{"id":"i5","text":"Cuillères en silicone et bol à ventouse","note":"","done":false},{"id":"i6","text":"Bavettes à manches","note":"3 ou 4.","done":false},{"id":"i7","text":"Céréales et purées pour bébé","note":"On vous dira ce qu’il mange rendu là.","done":false},{"id":"i8","text":"Verre à paille","note":"Ou un verre 360, pour pratiquer à boire de l’eau.","done":false},{"id":"i9","text":"Brosse à biberons et égouttoir","note":"","done":false},{"id":"i10","text":"Baignoire pour bébé","note":"Ou un tapis antidérapant dans le grand bain. Pas de siège ni d’anneau de bain. Peut s’emprunter.","done":false},{"id":"i11","text":"Couches","note":"On vous confirmera la taille plus près de notre arrivée.","done":false},{"id":"i12","text":"Lingettes pour bébé","note":"Sans parfum, en gros format.","done":false},{"id":"i13","text":"Crème pour les fesses","note":"La bonne vieille Penaten fait l’affaire.","done":false},{"id":"i14","text":"Matelas à langer et débarbouillettes","note":"Une serviette pliée sur un lit fait aussi l’affaire.","done":false},{"id":"i15","text":"Savon sans parfum","note":"Pour laver ses vêtements et ses bavettes.","done":false},{"id":"i16","text":"Tapis de jeu en mousse","note":"Un coin doux sur les planchers froids. Peut s’emprunter.","done":false},{"id":"i17","text":"Jouets de son âge","note":"Anneau de dentition, hochets, livres cartonnés.","done":false},{"id":"i18","text":"Barrière de foyer","note":"Un enclos autour du foyer ou du poêle à bois, s’il y en a un.","done":false},{"id":"i19","text":"Sapin protégé","note":"Un enclos autour, ou un petit sapin sur une table.","done":false},{"id":"i20","text":"Décorations incassables","note":"Pas de boules en verre, de crochets ni de glaçons à sa hauteur.","done":false},{"id":"i21","text":"Chandelles et plantes","note":"Gui, houx, poinsettia et chandelles hors de sa portée.","done":false},{"id":"i22","text":"Cache-prises","note":"Dans toutes les pièces où il joue à terre.","done":false},{"id":"i23","text":"Loquets d’armoires","note":"Sous l’évier et dans la salle de bain.","done":false},{"id":"i24","text":"Barrière d’escalier","note":"Vissée au mur en haut; à pression en bas seulement.","done":false},{"id":"i25","text":"Médicaments et sacs à main","note":"Rangés hors de sa portée.","done":false},{"id":"i26","text":"Cordons de stores","note":"Enroulés en hauteur, hors de sa portée.","done":false},{"id":"i27","text":"Piles bouton","note":"À cacher, dont celles des cartes musicales, des télécommandes et des décorations.","done":false},{"id":"i28","text":"Thermomètre numérique","note":"Rectal, avec embouts jetables.","done":false},{"id":"i29","text":"Acétaminophène pour bébé","note":"Tylenol ou Tempra en gouttes.","done":false},{"id":"i30","text":"Ibuprofène pour bébé","note":"Advil ou Motrin en gouttes.","done":false},{"id":"i31","text":"Eau saline et mouche-bébé manuel","note":"","done":false},{"id":"i32","text":"Désinfectant à mains","note":"Une bouteille à l’entrée pour la visite.","done":false},{"id":"i33","text":"Siège d’auto canadien","note":"Le nôtre est américain : au Québec, il faut un siège avec l’étiquette de Transport Canada (feuille d’érable). Un convertible installé dos à la route servira à chaque visite. Ex. : Graco Extend2Fit ou Clek Fllo. Faites vérifier l’installation (SAAQ).","done":false},{"id":"i34","text":"Habit de neige une pièce","note":"On n’a rien de ça en Caroline du Sud! Ex. : Deux par Deux.","done":false},{"id":"i35","text":"Mitaines sans pouce et tuque","note":"Ex. : Perlimpinpin.","done":false},{"id":"i36","text":"Chaussons doublés","note":"Pour la poussette et les promenades.","done":false},{"id":"i37","text":"Housse coupe-vent pour le siège d’auto","note":"Style « bonnet de douche ».","done":false}]};
 let S=null,pending=[],flushing=false,saveTimer=null;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -77,16 +76,36 @@ function render(){
   document.querySelectorAll('#list textarea').forEach(autosize);
 }
 
+// The storage service rejects requests that arrive too close together, so every
+// request goes through one queue, spaced out, with a few retries.
+const GAP=2500,sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let chain=Promise.resolve(),last=0;
+function req(fn){
+  const run=async()=>{
+    let err;
+    for(let a=0;a<4;a++){
+      const wait=last+GAP*(a+1)-Date.now();if(wait>0)await sleep(wait);
+      try{const v=await fn();last=Date.now();return v;}catch(e){last=Date.now();err=e;}
+    }
+    throw err;
+  };
+  const p=chain.then(run,run);chain=p.catch(()=>{});return p;
+}
+function strip(d){if(d&&typeof d==='object')delete d._metadata;return d;}
 async function getRemote(){
-  const r=await fetch(API,{cache:'no-store'});
-  if(r.status===400){const t=await r.text();if(/not exist|not found|Could not get basket/i.test(t))return null;throw new Error('get '+r.status);}
-  if(!r.ok)throw new Error('get '+r.status);
-  const d=await r.json();
-  return valid(d)?d:null;
+  return req(async()=>{
+    const r=await fetch(API,{cache:'no-store'});
+    if(!r.ok)throw new Error('get '+r.status);
+    const d=strip(await r.json());
+    if(!valid(d))throw new Error('bad data');
+    return d;
+  });
 }
 async function putRemote(d){
-  const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
-  if(!r.ok)throw new Error('post '+r.status);
+  return req(async()=>{
+    const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(strip(d))});
+    if(!r.ok)throw new Error('post '+r.status);
+  });
 }
 
 function apply(d,op){
@@ -109,8 +128,7 @@ async function flush(){
   flushing=true;
   const ops=pending.slice();
   try{
-    let d=await getRemote();
-    if(!d)d=JSON.parse(JSON.stringify(SEED));
+    const d=await getRemote();
     ops.forEach(o=>apply(d,o));
     await putRemote(d);
     pending=pending.slice(ops.length);
@@ -130,12 +148,11 @@ function editing(){const a=document.activeElement;return a&&(a.tagName==='TEXTAR
 async function refresh(first){
   if(flushing||pending.length)return;
   try{
-    let d=await getRemote();
-    if(!d){d=JSON.parse(JSON.stringify(SEED));await putRemote(d);}
-    const changed=JSON.stringify(d)!==JSON.stringify(S);
+    const d=await getRemote();
+    const wasEmpty=!S,changed=JSON.stringify(d)!==JSON.stringify(S);
     S=d;
-    if(changed&&(!editing()||first))render();
-    if(first)setStatus('');
+    if(changed&&(!editing()||wasEmpty))render();
+    if(wasEmpty)setStatus('');
   }catch(e){
     if(first){$('msg').hidden=false;$('msg').textContent='Impossible de charger la liste. Vérifiez votre connexion, puis rechargez la page.';setStatus('Hors ligne',true);}
   }
@@ -166,7 +183,7 @@ $('add').addEventListener('submit',e=>{
 });
 
 refresh(true);
-setInterval(()=>{if(document.visibilityState==='visible')refresh(false);},20000);
+setInterval(()=>{if(document.visibilityState==='visible')refresh(false);},30000);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refresh(false);});
 window.addEventListener('beforeunload',e=>{if(pending.length){e.preventDefault();e.returnValue='';}});
 }
