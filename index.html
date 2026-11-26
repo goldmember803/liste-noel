@@ -52,19 +52,23 @@ form input[type=text]{border:1px solid var(--line);padding:10px 12px;font-size:1
 <script>
 {
 const API='https://getpantry.cloud/apiv1/pantry/7845d9bd-2a10-451a-84a3-3a85ba252fab/basket/liste';
-let S=null,pending=[],flushing=false,saveTimer=null;
+let S=null,patch=null,flushing=false,saveTimer=null;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clean=v=>String(v==null?'':v).replace(/\s+/g,' ').trim().slice(0,500);
 
 function setStatus(t,err){const el=$('status');el.textContent=t;el.className='status'+(err?' err':'');}
-function updateCount(){if(!S)return;$('count').textContent=S.items.filter(i=>i.done).length+' sur '+S.items.length+' cochés';}
+function rows(){
+  if(!S||!S.items||typeof S.items!=='object')return [];
+  return Object.keys(S.items).map(id=>Object.assign({id},S.items[id]))
+    .filter(i=>i&&!i.del&&typeof i.text==='string').sort((a,b)=>(+a.o||0)-(+b.o||0));
+}
+function updateCount(){const r=rows();$('count').textContent=r.filter(i=>i.done).length+' sur '+r.length+' cochés';}
 function autosize(t){t.style.height='auto';t.style.height=t.scrollHeight+'px';}
-function valid(d){return d&&Array.isArray(d.items);}
 
 function render(){
   if(!S)return;
-  $('list').innerHTML=S.items.map(i=>
+  $('list').innerHTML=rows().map(i=>
     '<li class="'+(i.done?'done':'')+'" data-id="'+esc(i.id)+'">'+
       '<label class="ck"><input type="checkbox" '+(i.done?'checked':'')+' aria-label="Coché : '+esc(i.text)+'"></label>'+
       '<div><textarea class="nm" rows="1" aria-label="Article">'+esc(i.text)+'</textarea>'+
@@ -76,14 +80,14 @@ function render(){
   document.querySelectorAll('#list textarea').forEach(autosize);
 }
 
-// The storage service rejects requests that arrive too close together, so every
-// request goes through one queue, spaced out, with a few retries.
-const GAP=2500,sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// The storage service turns away requests that come too close together,
+// so every request waits its turn, spaced out, and is retried if refused.
+const GAP=4000,sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let chain=Promise.resolve(),last=0;
 function req(fn){
   const run=async()=>{
     let err;
-    for(let a=0;a<4;a++){
+    for(let a=0;a<6;a++){
       const wait=last+GAP*(a+1)-Date.now();if(wait>0)await sleep(wait);
       try{const v=await fn();last=Date.now();return v;}catch(e){last=Date.now();err=e;}
     }
@@ -91,64 +95,49 @@ function req(fn){
   };
   const p=chain.then(run,run);chain=p.catch(()=>{});return p;
 }
-function strip(d){if(d&&typeof d==='object')delete d._metadata;return d;}
-async function getRemote(){
-  return req(async()=>{
-    const r=await fetch(API,{cache:'no-store'});
-    if(!r.ok)throw new Error('get '+r.status);
-    const d=strip(await r.json());
-    if(!valid(d))throw new Error('bad data');
-    return d;
-  });
-}
-async function putRemote(d){
-  return req(async()=>{
-    const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(strip(d))});
-    if(!r.ok)throw new Error('post '+r.status);
-  });
-}
-
-function apply(d,op){
-  const it=op.id&&d.items.find(i=>i.id===op.id);
-  if(op.t==='done'&&it)it.done=op.v;
-  else if(op.t==='text'&&it)it.text=op.v;
-  else if(op.t==='note'&&it)it.note=op.v;
-  else if(op.t==='del')d.items=d.items.filter(i=>i.id!==op.id);
-  else if(op.t==='add'&&!d.items.some(i=>i.id===op.item.id))d.items.push(op.item);
+function okData(d){return d&&typeof d==='object'&&d.items&&typeof d.items==='object'&&!Array.isArray(d.items);}
+async function call(opts){
+  const r=await fetch(API,opts);
+  if(!r.ok)throw new Error(String(r.status));
+  const d=await r.json();delete d._metadata;
+  if(!okData(d))throw new Error('data');
   return d;
 }
+const getRemote=()=>req(()=>call({cache:'no-store'}));
+const putPatch=p=>req(()=>call({method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:p})}));
 
-function queue(op){
-  pending.push(op);apply(S,op);
+function merge(a,b){for(const k in b){if(b[k]&&typeof b[k]==='object'){a[k]=merge(a[k]&&typeof a[k]==='object'?a[k]:{},b[k]);}else a[k]=b[k];}return a;}
+function change(id,fields){
+  patch=patch||{};patch[id]=Object.assign(patch[id]||{},fields);
+  merge(S.items,{[id]:fields});
   setStatus('Enregistrement…');
-  clearTimeout(saveTimer);saveTimer=setTimeout(flush,500);
+  clearTimeout(saveTimer);saveTimer=setTimeout(flush,600);
 }
 async function flush(){
-  if(flushing||!pending.length)return;
+  if(flushing||!patch)return;
   flushing=true;
-  const ops=pending.slice();
+  const p=patch;patch=null;
   try{
-    const d=await getRemote();
-    ops.forEach(o=>apply(d,o));
-    await putRemote(d);
-    pending=pending.slice(ops.length);
-    S=d;pending.forEach(o=>apply(S,o));
+    const d=await putPatch(p);
+    S=patch?merge(d,{items:patch}):d;
     if(!editing())render();
-    setStatus(pending.length?'Enregistrement…':'Enregistré');
+    setStatus(patch?'Enregistrement…':'Enregistré');
   }catch(e){
-    setStatus('Pas enregistré : vérifiez votre connexion. Nouvel essai dans quelques secondes.',true);
-    setTimeout(()=>{flushing=false;flush();},5000);return;
+    patch=merge(p,patch||{});
+    setStatus('Pas encore enregistré, nouvel essai… (vérifiez votre connexion)',true);
+    flushing=false;setTimeout(flush,8000);return;
   }
   flushing=false;
-  if(pending.length)flush();
+  if(patch)flush();
 }
 
 function editing(){const a=document.activeElement;return a&&(a.tagName==='TEXTAREA'||a.id==='newItem');}
 
 async function refresh(first){
-  if(flushing||pending.length)return;
+  if(flushing||patch)return;
   try{
     const d=await getRemote();
+    if(flushing||patch)return;
     const wasEmpty=!S,changed=JSON.stringify(d)!==JSON.stringify(S);
     S=d;
     if(changed&&(!editing()||wasEmpty))render();
@@ -160,32 +149,32 @@ async function refresh(first){
 
 $('list').addEventListener('change',e=>{
   const li=e.target.closest('li[data-id]');if(!li||!S)return;
-  const id=li.dataset.id,it=S.items.find(i=>i.id===id);if(!it)return;
+  const id=li.dataset.id,it=S.items[id];if(!it)return;
   const t=e.target;
-  if(t.type==='checkbox'){li.classList.toggle('done',t.checked);queue({t:'done',id,v:t.checked});updateCount();}
-  else if(t.classList.contains('nm')){const v=clean(t.value);if(!v){t.value=it.text;autosize(t);return;}if(v!==it.text)queue({t:'text',id,v});}
-  else if(t.classList.contains('nt')){const v=clean(t.value);if(v!==it.note)queue({t:'note',id,v});}
+  if(t.type==='checkbox'){li.classList.toggle('done',t.checked);change(id,{done:t.checked});updateCount();}
+  else if(t.classList.contains('nm')){const v=clean(t.value);if(!v){t.value=it.text;autosize(t);return;}if(v!==it.text)change(id,{text:v});}
+  else if(t.classList.contains('nt')){const v=clean(t.value);if(v!==(it.note||''))change(id,{note:v});}
 });
 $('list').addEventListener('input',e=>{if(e.target.tagName==='TEXTAREA')autosize(e.target);});
 $('list').addEventListener('keydown',e=>{if(e.target.tagName==='TEXTAREA'&&e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.target.blur();}});
 $('list').addEventListener('click',e=>{
-  const b=e.target.closest('.del');if(!b)return;
+  const b=e.target.closest('.del');if(!b||!S)return;
   const li=b.closest('li[data-id]');
-  if(b.classList.contains('armed')){li.remove();queue({t:'del',id:li.dataset.id});updateCount();return;}
+  if(b.classList.contains('armed')){li.remove();change(li.dataset.id,{del:true});updateCount();return;}
   b.classList.add('armed');b.textContent='Supprimer';
   setTimeout(()=>{if(b.isConnected){b.classList.remove('armed');b.textContent='×';}},3500);
 });
 $('add').addEventListener('submit',e=>{
   e.preventDefault();if(!S)return;
   const v=clean($('newItem').value);if(!v)return;
-  const item={id:'n'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),text:v,note:'',done:false};
-  $('newItem').value='';queue({t:'add',item});render();
+  const id='n'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  $('newItem').value='';change(id,{text:v,note:'',done:false,o:Date.now()});render();
 });
 
 refresh(true);
-setInterval(()=>{if(document.visibilityState==='visible')refresh(false);},30000);
+setInterval(()=>{if(document.visibilityState==='visible')refresh(false);},60000);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refresh(false);});
-window.addEventListener('beforeunload',e=>{if(pending.length){e.preventDefault();e.returnValue='';}});
+window.addEventListener('beforeunload',e=>{if(patch||flushing){e.preventDefault();e.returnValue='';}});
 }
 </script>
 </body>
